@@ -1,147 +1,422 @@
 if (typeof window.__arabicFixerLoaded === "undefined") {
   window.__arabicFixerLoaded = true;
   const STYLE_ID = "bidi-fixer-style";
+  const ATTR_NAME = "data-bidi-dir";
+
+  // Strong RTL letters (Arabic, Hebrew, Syriac, Thaana, NKo, presentation forms)
+  const RTL_CHAR_RE =
+    /[\u0591-\u05F4\u0621-\u064A\u066E-\u06D3\u06FA-\u06FF\u0710-\u074F\u0750-\u077F\u0780-\u07B1\u07C0-\u07EA\u08A0-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFC]/g;
+  // Strong LTR letters (Latin, Extended Latin, Greek, Cyrillic)
+  const LTR_CHAR_RE =
+    /[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F\u0370-\u03FF\u0400-\u04FF]/g;
+  // First strong directional character
+  const FIRST_STRONG_RE =
+    /([\u0591-\u05F4\u0621-\u064A\u066E-\u06D3\u06FA-\u06FF\u0710-\u074F\u0750-\u077F\u0780-\u07B1\u07C0-\u07EA\u08A0-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFC])|([A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F\u0370-\u03FF\u0400-\u04FF])/;
+
+  const BLOCK_SELECTOR =
+    "p, li, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, dt, dd, th, td, figcaption, caption";
+  const INPUT_SELECTOR =
+    'input:not([type="url"]):not([type="email"]):not([type="tel"]):not([type="number"]):not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="range"]):not([type="color"]):not([type="file"]), textarea, [contenteditable="true"], [contenteditable=""]';
+  const SKIP_ANCESTOR_SELECTOR =
+    'pre, code, kbd, samp, script, style, noscript, svg, math, .katex, .MathJax, [class*="hljs"], [class*="CodeMirror"], [class*="monaco-editor"]';
+  const UI_ANCESTOR_SELECTOR =
+    'nav, header, footer, aside, button, [role="button"], [role="navigation"], [role="menu"], [role="menubar"], [role="toolbar"]';
+  const BLOCK_CHILD_SELECTOR =
+    "p, div, ul, ol, li, blockquote, pre, table, section, article, header, footer, nav, aside, h1, h2, h3, h4, h5, h6";
+
+  let currentEnabled = false;
+  let currentForceImportant = false;
+  let observer = null;
+  let headObserver = null;
+  let debounceTimer = null;
+  let pendingNodes = new Set();
 
   function generateCSS(forceImportant) {
     const imp = forceImportant ? " !important" : "";
 
-    if (!forceImportant) {
-      return `
-      :root { --arabic-dir: rtl; --arabic-align: start; }
-      p, li, ul, ol, h1, h2, h3, h4, h5, h6, blockquote, table, th, td {
-        direction: var(--arabic-dir); text-align: var(--arabic-align);
+    return `
+      [${ATTR_NAME}="rtl"] {
+        direction: rtl${imp};
+        text-align: start${imp};
+        unicode-bidi: isolate${imp};
       }
-      input:not([type="url"]):not([type="email"]):not([type="tel"]):not([type="number"]):not([type="password"]),
-      textarea, select {
-        direction: var(--arabic-dir); text-align: var(--arabic-align);
+      ul[${ATTR_NAME}="rtl"],
+      ol[${ATTR_NAME}="rtl"] {
+        padding-inline-start: 1.5em${imp};
+        padding-inline-end: 0${imp};
       }
-      pre, code, kbd, samp {
-        direction: ltr !important; text-align: left !important; unicode-bidi: normal !important;
+      [${ATTR_NAME}="ltr"] {
+        direction: ltr${imp};
+        unicode-bidi: isolate${imp};
+      }
+      p[${ATTR_NAME}="ltr"],
+      li[${ATTR_NAME}="ltr"],
+      ul[${ATTR_NAME}="ltr"],
+      ol[${ATTR_NAME}="ltr"],
+      blockquote[${ATTR_NAME}="ltr"],
+      dt[${ATTR_NAME}="ltr"],
+      dd[${ATTR_NAME}="ltr"],
+      td[${ATTR_NAME}="ltr"],
+      th[${ATTR_NAME}="ltr"],
+      textarea[${ATTR_NAME}="ltr"],
+      input[${ATTR_NAME}="ltr"],
+      [contenteditable][${ATTR_NAME}="ltr"],
+      [${ATTR_NAME}="rtl"] [${ATTR_NAME}="ltr"] {
+        text-align: start${imp};
+      }
+      pre, kbd, samp,
+      pre *,
+      [class*="hljs"],
+      [class*="CodeMirror"],
+      [class*="monaco-editor"] {
+        direction: ltr !important;
+        text-align: left !important;
+        unicode-bidi: isolate !important;
+      }
+      code, .katex, .MathJax, math {
+        direction: ltr !important;
+        unicode-bidi: isolate !important;
       }
     `;
+  }
+
+  function detectTextDirection(text) {
+    if (!text) return null;
+
+    const rtlMatches = text.match(RTL_CHAR_RE);
+    const ltrMatches = text.match(LTR_CHAR_RE);
+    const rtlCount = rtlMatches ? rtlMatches.length : 0;
+    const ltrCount = ltrMatches ? ltrMatches.length : 0;
+
+    if (rtlCount === 0 && ltrCount === 0) return null;
+    if (rtlCount === 0) return "ltr";
+    if (ltrCount === 0) return "rtl";
+
+    const total = rtlCount + ltrCount;
+    const rtlRatio = rtlCount / total;
+    const firstStrong = FIRST_STRONG_RE.exec(text);
+    const startsWithRTL = Boolean(firstStrong && firstStrong[1]);
+
+    if (startsWithRTL) {
+      return rtlRatio >= 0.2 ? "rtl" : "ltr";
+    }
+    return rtlRatio >= 0.4 ? "rtl" : "ltr";
+  }
+
+  function extractRelevantText(el) {
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      return el.value || "";
+    }
+
+    const isListItem = el.tagName === "LI";
+
+    // Collect text while skipping code/math/script/style subtrees (and nested lists inside <li>)
+    let text = "";
+    const stack = [el];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      for (let i = node.childNodes.length - 1; i >= 0; i--) {
+        const child = node.childNodes[i];
+        if (child.nodeType === 3) {
+          text += child.nodeValue;
+        } else if (child.nodeType === 1) {
+          if (child.matches && child.matches(SKIP_ANCESTOR_SELECTOR)) {
+            continue;
+          }
+          if (
+            isListItem &&
+            (child.tagName === "UL" ||
+              child.tagName === "OL" ||
+              child.tagName === "BLOCKQUOTE" ||
+              child.tagName === "TABLE")
+          ) {
+            continue;
+          }
+          stack.push(child);
+        }
+      }
+    }
+    return text;
+  }
+
+  function setDirAttr(el, dir) {
+    if (!dir) {
+      if (el.hasAttribute(ATTR_NAME)) el.removeAttribute(ATTR_NAME);
+      return;
+    }
+    if (el.getAttribute(ATTR_NAME) !== dir) {
+      el.setAttribute(ATTR_NAME, dir);
+    }
+  }
+
+  function processElement(el) {
+    if (!el || el.nodeType !== 1) return;
+    if (el.closest && el.closest(SKIP_ANCESTOR_SELECTOR)) return;
+
+    if (el.matches && el.matches(INPUT_SELECTOR)) {
+      const dir = detectTextDirection(extractRelevantText(el));
+      setDirAttr(el, dir);
+      return;
+    }
+
+    if (el.matches && el.matches(BLOCK_SELECTOR)) {
+      const dir = detectTextDirection(extractRelevantText(el));
+      setDirAttr(el, dir);
+      return;
+    }
+
+    // Handle leaf <div> elements (e.g., chat bubbles without <p>) without disturbing UI chrome
+    if (
+      el.tagName === "DIV" &&
+      !(el.closest && el.closest(UI_ANCESTOR_SELECTOR)) &&
+      !(el.querySelector && el.querySelector(BLOCK_CHILD_SELECTOR))
+    ) {
+      const text = extractRelevantText(el).trim();
+      if (!text) return;
+      const dir = detectTextDirection(text);
+      if (dir === "rtl") {
+        setDirAttr(el, "rtl");
+      } else if (dir === "ltr") {
+        if (
+          el.parentElement &&
+          el.parentElement.closest(`[${ATTR_NAME}="rtl"]`)
+        ) {
+          setDirAttr(el, "ltr");
+        } else if (el.getAttribute(ATTR_NAME) === "rtl") {
+          el.removeAttribute(ATTR_NAME);
+        }
+      }
+    }
+  }
+
+  function processSubtree(root) {
+    if (!root || root.nodeType !== 1) return;
+    processElement(root);
+
+    if (typeof root.querySelectorAll === "function") {
+      const blocks = root.querySelectorAll(
+        `${BLOCK_SELECTOR}, ${INPUT_SELECTOR}, div`,
+      );
+      for (let i = 0; i < blocks.length; i++) {
+        processElement(blocks[i]);
+      }
+    }
+  }
+
+  function clearDirections() {
+    if (typeof document.querySelectorAll !== "function") return;
+    const tagged = document.querySelectorAll(`[${ATTR_NAME}]`);
+    for (let i = 0; i < tagged.length; i++) {
+      tagged[i].removeAttribute(ATTR_NAME);
+    }
+  }
+
+  function injectStyleTag(forceImportant) {
+    const cssCode = generateCSS(forceImportant);
+    let styleEl = document.getElementById(STYLE_ID);
+    if (styleEl) {
+      if (styleEl.textContent !== cssCode) {
+        styleEl.textContent = cssCode;
+      }
     } else {
-      return `
-    :root { --arabic-dir: rtl; --arabic-align: start; }
+      const container = document.head || document.documentElement;
+      if (!container) return;
+      styleEl = document.createElement("style");
+      styleEl.id = STYLE_ID;
+      styleEl.textContent = cssCode;
+      container.appendChild(styleEl);
+    }
+  }
 
-    html, body {
-      direction: var(--arabic-dir) !important;
-      text-align: var(--arabic-align) !important;
+  function handleUserInput(event) {
+    if (!currentEnabled) return;
+    const target = event.target;
+    if (
+      target &&
+      target.nodeType === 1 &&
+      target.matches &&
+      target.matches(INPUT_SELECTOR)
+    ) {
+      processElement(target);
+    }
+  }
+
+  function flushPendingNodes() {
+    debounceTimer = null;
+    if (!currentEnabled) {
+      pendingNodes.clear();
+      return;
     }
 
-    pre, code, kbd, samp,
-    pre *, code *,
-    [class*="code"], [class*="hljs"],
-    [class*="CodeMirror"], [class*="monaco-editor"] {
-      direction: ltr !important;
-      text-align: left !important;
-      unicode-bidi: normal !important;
+    const nodes = Array.from(pendingNodes);
+    pendingNodes.clear();
+
+    const containersToUpdate = new Set();
+    for (const node of nodes) {
+      if (!node || !node.isConnected) continue;
+      processSubtree(node);
+
+      if (node.parentElement && node.parentElement.closest) {
+        const parentBlock = node.parentElement.closest(BLOCK_SELECTOR);
+        if (parentBlock) containersToUpdate.add(parentBlock);
+        const parentListOrQuote =
+          node.parentElement.closest("ul, ol, blockquote");
+        if (parentListOrQuote) containersToUpdate.add(parentListOrQuote);
+      }
     }
 
-    nav, aside, header, footer,
-    [role="navigation"], [role="menu"], [role="menubar"],
-    [class*="sidebar"], [class*="menu"], [class*="nav"],
-    [class*="drawer"], [id*="sidebar"], [id*="menu"], [id*="nav"] {
-      direction: ltr !important;
-      text-align: left !important;
+    for (const container of containersToUpdate) {
+      if (container.isConnected) processElement(container);
+    }
+  }
+
+  function setupObservers() {
+    disconnectObservers();
+
+    const headTarget = document.head || document.documentElement;
+    if (headTarget) {
+      headObserver = new MutationObserver(() => {
+        if (currentEnabled && !document.getElementById(STYLE_ID)) {
+          injectStyleTag(currentForceImportant);
+        }
+      });
+      headObserver.observe(headTarget, { childList: true });
     }
 
-    *[style*="flex"], *[style*="grid"] {
-      direction: ltr !important;
+    const bodyTarget = document.body || document.documentElement;
+    if (bodyTarget) {
+      observer = new MutationObserver((mutations) => {
+        if (!currentEnabled) return;
+
+        for (const mutation of mutations) {
+          if (mutation.type === "characterData") {
+            const parent = mutation.target.parentElement;
+            if (parent) pendingNodes.add(parent);
+          } else if (mutation.type === "childList") {
+            for (let i = 0; i < mutation.addedNodes.length; i++) {
+              const added = mutation.addedNodes[i];
+              if (added.nodeType === 1) {
+                pendingNodes.add(added);
+              } else if (added.nodeType === 3 && mutation.target.nodeType === 1) {
+                pendingNodes.add(mutation.target);
+              }
+            }
+          }
+        }
+
+        if (pendingNodes.size > 0 && !debounceTimer) {
+          debounceTimer = setTimeout(flushPendingNodes, 80);
+        }
+      });
+
+      observer.observe(bodyTarget, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
     }
-  `;
+
+    document.addEventListener("input", handleUserInput, true);
+  }
+
+  function disconnectObservers() {
+    if (observer) {
+      observer.disconnect();
+      observer = null;
     }
+    if (headObserver) {
+      headObserver.disconnect();
+      headObserver = null;
+    }
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    pendingNodes.clear();
+    document.removeEventListener("input", handleUserInput, true);
   }
 
   function applyStyles(enabled, forceImportant) {
-    let styleEl = document.getElementById(STYLE_ID);
-    if (enabled) {
-      const cssCode = generateCSS(forceImportant);
-      if (styleEl) styleEl.textContent = cssCode;
-      else {
-        styleEl = document.createElement("style");
-        styleEl.id = STYLE_ID;
-        styleEl.textContent = cssCode;
-        document.head.appendChild(styleEl);
+    currentEnabled = Boolean(enabled);
+    currentForceImportant = Boolean(forceImportant);
+
+    if (currentEnabled) {
+      injectStyleTag(currentForceImportant);
+      if (document.body) {
+        processSubtree(document.body);
       }
+      setupObservers();
     } else {
+      disconnectObservers();
+      const styleEl = document.getElementById(STYLE_ID);
       if (styleEl) styleEl.remove();
+      clearDirections();
     }
-  }
-
-  function detectPageRTL() {
-    const sampleText = (document.body && document.body.innerText ? document.body.innerText : "").slice(
-      0,
-      3000,
-    );
-    if (!sampleText.trim()) return false;
-
-    const rtlChars = sampleText.match(/[\u0591-\u07FF\uFB1D-\uFDFD\uFE70-\uFEFC]/g) || [];
-    return rtlChars.length / sampleText.length > 0.15;
   }
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "APPLY_CSS_FIX") {
       applyStyles(request.enabled, request.forceImportant);
       sendResponse({ success: true });
-    } else if (request.action === "DETECT_RTL") {
-      sendResponse({ isRTL: detectPageRTL() });
     }
-    return true;
+    return false;
   });
 
-  (async () => {
-    try {
-      const domain = window.location.hostname.toLowerCase();
+  window.addEventListener("pagehide", () => {
+    disconnectObservers();
+  });
 
-      const result = await chrome.storage.local.get([
-        `site:${domain}`,
-        "globalEnabled",
-        "excludePatterns",
-      ]);
+  try {
+    const domain = window.location.hostname.toLowerCase();
+    const siteKey = `site:${domain}`;
 
-      const siteSettings = result[`site:${domain}`];
-      const globalEnabled = result.globalEnabled || false;
-      const excludePatterns = result.excludePatterns || [];
+    chrome.storage.local.get(
+      ["globalEnabled", "excludePatterns", siteKey],
+      (result) => {
+        if (chrome.runtime.lastError) {
+          console.error(
+            "RTL Fixer: Storage access error:",
+            chrome.runtime.lastError,
+          );
+          return;
+        }
 
-      let isExcluded = false;
-      for (const pattern of excludePatterns) {
-        try {
-          const regex = new RegExp(pattern, "i");
-          if (regex.test(domain)) {
-            console.log(`RTL Fixer: Domain ${domain} matches exclude pattern ${pattern}`);
-            isExcluded = true;
-            break;
+        const globalEnabled = Boolean(result.globalEnabled);
+        const excludePatterns = result.excludePatterns || [];
+        const siteSettings = result[siteKey] || {
+          enabled: null,
+          forceImportant: false,
+        };
+
+        let isExcluded = false;
+        for (const pattern of excludePatterns) {
+          try {
+            const regex = new RegExp(pattern, "i");
+            if (regex.test(domain)) {
+              isExcluded = true;
+              break;
+            }
+          } catch (error) {
+            console.error(
+              `RTL Fixer: Invalid exclude pattern ${pattern}:`,
+              error,
+            );
           }
-        } catch (error) {
-          console.error(`RTL Fixer: Invalid exclude pattern ${pattern}:`, error);
         }
-      }
 
-      if (isExcluded) {
-        console.log(`RTL Fixer: Skipping ${domain} due to exclude pattern`);
-        return;
-      }
-
-      let isEnabled = false;
-      let forceImportant = false;
-
-      if (globalEnabled) {
-        if (siteSettings && siteSettings.enabled === false) {
-          isEnabled = false;
-        } else {
-          isEnabled = true;
-          forceImportant = siteSettings ? siteSettings.forceImportant : false;
+        if (isExcluded) {
+          return;
         }
-      } else if (siteSettings && siteSettings.enabled) {
-        isEnabled = true;
-        forceImportant = siteSettings.forceImportant;
-      }
 
-      if (isEnabled) {
-        applyStyles(true, forceImportant);
-      }
-    } catch (error) {
-      console.error("RTL Fixer: Error during initialization:", error);
-    }
-  })();
+        const isEnabled = siteSettings.enabled ?? globalEnabled;
+        const forceImportant = Boolean(siteSettings.forceImportant);
+
+        if (isEnabled) {
+          applyStyles(true, forceImportant);
+        }
+      },
+    );
+  } catch (error) {
+    console.error("RTL Fixer: Error during initialization:", error);
+  }
 }
