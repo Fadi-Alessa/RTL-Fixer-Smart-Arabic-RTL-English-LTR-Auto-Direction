@@ -21,8 +21,8 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
     'pre, code, kbd, samp, script, style, noscript, svg, math, .katex, .MathJax, [class*="hljs"], [class*="CodeMirror"], [class*="monaco-editor"]';
   const UI_ANCESTOR_SELECTOR =
     'nav, header, footer, aside, button, [role="button"], [role="navigation"], [role="menu"], [role="menubar"], [role="toolbar"]';
-  const BLOCK_CHILD_SELECTOR =
-    "p, div, ul, ol, li, blockquote, pre, table, section, article, header, footer, nav, aside, h1, h2, h3, h4, h5, h6";
+  const STRUCTURAL_BLOCK_SELECTOR =
+    "p, ul, ol, li, blockquote, pre, table, section, article, header, footer, nav, aside, h1, h2, h3, h4, h5, h6";
 
   let currentEnabled = false;
   let currentForceImportant = false;
@@ -35,33 +35,34 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
     const imp = forceImportant ? " !important" : "";
 
     return `
-      [${ATTR_NAME}="rtl"] {
+      html [${ATTR_NAME}="rtl"] {
         direction: rtl${imp};
         text-align: start${imp};
         unicode-bidi: isolate${imp};
       }
-      ul[${ATTR_NAME}="rtl"],
-      ol[${ATTR_NAME}="rtl"] {
+      html ul[${ATTR_NAME}="rtl"],
+      html ol[${ATTR_NAME}="rtl"] {
         padding-inline-start: 1.5em${imp};
         padding-inline-end: 0${imp};
       }
-      [${ATTR_NAME}="ltr"] {
+      html [${ATTR_NAME}="ltr"] {
         direction: ltr${imp};
         unicode-bidi: isolate${imp};
       }
-      p[${ATTR_NAME}="ltr"],
-      li[${ATTR_NAME}="ltr"],
-      ul[${ATTR_NAME}="ltr"],
-      ol[${ATTR_NAME}="ltr"],
-      blockquote[${ATTR_NAME}="ltr"],
-      dt[${ATTR_NAME}="ltr"],
-      dd[${ATTR_NAME}="ltr"],
-      td[${ATTR_NAME}="ltr"],
-      th[${ATTR_NAME}="ltr"],
-      textarea[${ATTR_NAME}="ltr"],
-      input[${ATTR_NAME}="ltr"],
-      [contenteditable][${ATTR_NAME}="ltr"],
-      [${ATTR_NAME}="rtl"] [${ATTR_NAME}="ltr"] {
+      html p[${ATTR_NAME}="ltr"],
+      html li[${ATTR_NAME}="ltr"],
+      html ul[${ATTR_NAME}="ltr"],
+      html ol[${ATTR_NAME}="ltr"],
+      html blockquote[${ATTR_NAME}="ltr"],
+      html dt[${ATTR_NAME}="ltr"],
+      html dd[${ATTR_NAME}="ltr"],
+      html td[${ATTR_NAME}="ltr"],
+      html th[${ATTR_NAME}="ltr"],
+      html textarea[${ATTR_NAME}="ltr"],
+      html input[${ATTR_NAME}="ltr"],
+      html [contenteditable][${ATTR_NAME}="ltr"],
+      html [${ATTR_NAME}="rtl"] [${ATTR_NAME}="ltr"],
+      html [dir="rtl"] [${ATTR_NAME}="ltr"] {
         text-align: start${imp};
       }
       pre, kbd, samp,
@@ -103,14 +104,15 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
     return rtlRatio >= 0.4 ? "rtl" : "ltr";
   }
 
-  function extractRelevantText(el) {
+  function extractRelevantText(el, skipChildDivs = false) {
     if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
       return el.value || "";
     }
 
     const isListItem = el.tagName === "LI";
 
-    // Collect text while skipping code/math/script/style subtrees (and nested lists inside <li>)
+    // Collect text while skipping code/math/script/style/button subtrees
+    // (and nested lists inside <li>, or nested <div> chips when scanning a paragraph <div>)
     let text = "";
     const stack = [el];
     while (stack.length > 0) {
@@ -120,7 +122,14 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
         if (child.nodeType === 3) {
           text += child.nodeValue;
         } else if (child.nodeType === 1) {
-          if (child.matches && child.matches(SKIP_ANCESTOR_SELECTOR)) {
+          if (
+            child.matches &&
+            (child.matches(SKIP_ANCESTOR_SELECTOR) ||
+              child.matches('button, [role="button"]'))
+          ) {
+            continue;
+          }
+          if (skipChildDivs && child.tagName === "DIV") {
             continue;
           }
           if (
@@ -165,13 +174,14 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
       return;
     }
 
-    // Handle leaf <div> elements (e.g., chat bubbles without <p>) without disturbing UI chrome
+    // Handle prose/paragraph <div> elements (e.g., Google AI Overviews, chat bubbles)
+    // including ones that contain inline citation chips or badges built with nested <div>s
     if (
       el.tagName === "DIV" &&
       !(el.closest && el.closest(UI_ANCESTOR_SELECTOR)) &&
-      !(el.querySelector && el.querySelector(BLOCK_CHILD_SELECTOR))
+      !(el.querySelector && el.querySelector(STRUCTURAL_BLOCK_SELECTOR))
     ) {
-      const text = extractRelevantText(el).trim();
+      const text = extractRelevantText(el, true).trim();
       if (!text) return;
       const dir = detectTextDirection(text);
       if (dir === "rtl") {
@@ -179,7 +189,7 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
       } else if (dir === "ltr") {
         if (
           el.parentElement &&
-          el.parentElement.closest(`[${ATTR_NAME}="rtl"]`)
+          el.parentElement.closest(`[${ATTR_NAME}="rtl"], [dir="rtl"]`)
         ) {
           setDirAttr(el, "ltr");
         } else if (el.getAttribute(ATTR_NAME) === "rtl") {
@@ -259,6 +269,8 @@ if (typeof window.__arabicFixerLoaded === "undefined") {
       if (node.parentElement && node.parentElement.closest) {
         const parentBlock = node.parentElement.closest(BLOCK_SELECTOR);
         if (parentBlock) containersToUpdate.add(parentBlock);
+        const parentDiv = node.parentElement.closest("div");
+        if (parentDiv) containersToUpdate.add(parentDiv);
         const parentListOrQuote =
           node.parentElement.closest("ul, ol, blockquote");
         if (parentListOrQuote) containersToUpdate.add(parentListOrQuote);
